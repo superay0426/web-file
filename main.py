@@ -2,11 +2,52 @@ import os
 import sys
 import winreg
 import subprocess
+
+# ----------------------------------------------------------------------
+# 🛡️ 啟動前自我修復機制：雙重檢測 PyQt6 與 yt-dlp
+# ----------------------------------------------------------------------
+def auto_install_requirements():
+    """在 GUI 啟動前，透過 Console 檢測並自動用 pip 補齊所需套件"""
+    required_packages = ["PyQt6", "yt-dlp"]
+    missing_packages = []
+
+    for pkg in required_packages:
+        # 轉換套件導入名稱 (yt-dlp 在 import 時要寫成 yt_dlp)
+        import_name = pkg.replace("-", "_")
+        try:
+            __import__(import_name)
+        except ImportError:
+            missing_packages.append(pkg)
+
+    if missing_packages:
+        print("=" * 60)
+        print(f"⚠️ 檢測到缺少以下必要 Python 套件: {', '.join(missing_packages)}")
+        print("🚀 正在為您自動透過 pip 進行安裝，請稍候...")
+        print("=" * 60)
+
+        for pkg in missing_packages:
+            try:
+                cmd = [sys.executable, "-m", "pip", "install", "--upgrade", pkg]
+                # 執行 pip 安裝並將結果印在 Console 上
+                subprocess.check_call(cmd)
+                print(f"✅ 【{pkg}】 安裝成功！")
+            except subprocess.CalledProcessError as e:
+                print(f"❌ 【{pkg}】 安裝失敗！錯誤碼：{e.returncode}")
+                print("請檢查網路連線，或手動執行 'pip install PyQt6 yt-dlp'")
+                sys.exit(1)
+        print("\n🎉 所有必要套件部署完成，即將啟動 GUI 介面...\n")
+
+# 執行預檢與自動安裝
+auto_install_requirements()
+
+# ----------------------------------------------------------------------
+# 📦 套件確定存在後，才安全導入 PyQt6 模組
+# ----------------------------------------------------------------------
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QDialog,
-    QComboBox, QCheckBox, QGroupBox
+    QComboBox, QCheckBox, QGroupBox, QFileDialog
 )
 
 # ----------------------------------------------------------------------
@@ -311,40 +352,6 @@ def apply_theme(app, mode_name):
         app.setStyleSheet(STYLE_LIGHT)
 
 # ----------------------------------------------------------------------
-# 背景線程：自動 pip install
-# ----------------------------------------------------------------------
-class PipInstallThread(QThread):
-    log_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(bool)
-
-    def run(self):
-        self.log_signal.emit("⚠️ 檢測到尚未安裝 yt-dlp 套件，正在自動透過 pip 安裝...\n")
-        try:
-            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"]
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            )
-            for line in process.stdout:
-                self.log_signal.emit(line)
-            process.wait()
-
-            if process.returncode == 0:
-                self.log_signal.emit("✅ yt-dlp 套件安裝成功！\n\n")
-                self.finished_signal.emit(True)
-            else:
-                self.log_signal.emit(f"❌ pip 安裝失敗，錯誤代碼：{process.returncode}\n\n")
-                self.finished_signal.emit(False)
-        except Exception as e:
-            self.log_signal.emit(f"❌ 自動安裝失敗：{e}\n\n")
-            self.finished_signal.emit(False)
-
-# ----------------------------------------------------------------------
 # 背景線程：執行音訊下載
 # ----------------------------------------------------------------------
 class DownloadThread(QThread):
@@ -459,9 +466,7 @@ class MainWindow(QMainWindow):
         self.cfg_thumb = True
 
         self.output_dir = get_real_download_folder()
-
         self.init_ui()
-        self.check_ytdlp_installed()
 
     def init_ui(self):
         outer_widget = QWidget()
@@ -515,24 +520,8 @@ class MainWindow(QMainWindow):
 
         outer_layout.addWidget(card)
 
+        self.append_log("✅ [SYS] 環境檢測通過 (PyQt6 & yt-dlp 已載入)\n")
         self.append_log(f"📁 [SYS] 預設下載路徑: {self.output_dir}\n")
-
-    def check_ytdlp_installed(self):
-        """檢查環境中是否有 yt-dlp"""
-        try:
-            import yt_dlp
-            self.append_log("✅ [SYS] 已成功載入 pip yt-dlp 環境！\n")
-        except ImportError:
-            self.download_btn.setEnabled(False)
-            self.download_btn.setText("正在安裝 yt-dlp 套件...")
-            self.pip_thread = PipInstallThread()
-            self.pip_thread.log_signal.connect(self.append_log)
-            self.pip_thread.finished_signal.connect(self.on_pip_finished)
-            self.pip_thread.start()
-
-    def on_pip_finished(self, success):
-        self.download_btn.setEnabled(True)
-        self.download_btn.setText("🚀 開始下載 MP3")
 
     def append_log(self, text):
         self.log_box.moveCursor(self.log_box.textCursor().MoveOperation.End)
@@ -561,7 +550,6 @@ class MainWindow(QMainWindow):
 
         output_template = os.path.join(save_path, "%(title)s.%(ext)s")
 
-        # 使用目前 Python 環境下的 yt-dlp module 指令
         cmd = [
             sys.executable, "-m", "yt_dlp",
             "--no-playlist",
