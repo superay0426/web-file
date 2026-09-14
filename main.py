@@ -1,7 +1,12 @@
 import os
+import re
 import sys
-import winreg
 import subprocess
+
+try:
+    import winreg
+except ImportError:
+    winreg = None  # 非 Windows 平台沒有 winreg，改用預設下載路徑
 
 # ----------------------------------------------------------------------
 # 🛡️ 啟動前自我修復機制：雙重檢測 PyQt6 與 yt-dlp
@@ -12,7 +17,6 @@ def auto_install_requirements():
     missing_packages = []
 
     for pkg in required_packages:
-        # 轉換套件導入名稱 (yt-dlp 在 import 時要寫成 yt_dlp)
         import_name = pkg.replace("-", "_")
         try:
             __import__(import_name)
@@ -28,7 +32,6 @@ def auto_install_requirements():
         for pkg in missing_packages:
             try:
                 cmd = [sys.executable, "-m", "pip", "install", "--upgrade", pkg]
-                # 執行 pip 安裝並將結果印在 Console 上
                 subprocess.check_call(cmd)
                 print(f"✅ 【{pkg}】 安裝成功！")
             except subprocess.CalledProcessError as e:
@@ -37,17 +40,17 @@ def auto_install_requirements():
                 sys.exit(1)
         print("\n🎉 所有必要套件部署完成，即將啟動 GUI 介面...\n")
 
-# 執行預檢與自動安裝
 auto_install_requirements()
 
 # ----------------------------------------------------------------------
 # 📦 套件確定存在後，才安全導入 PyQt6 模組
 # ----------------------------------------------------------------------
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
+from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QDialog,
-    QComboBox, QCheckBox, QGroupBox, QFileDialog
+    QComboBox, QCheckBox, QGroupBox, QFileDialog, QProgressBar
 )
 
 # ----------------------------------------------------------------------
@@ -128,6 +131,12 @@ QPushButton:pressed {
     background-color: #1d4ed8;
 }
 
+QPushButton:disabled {
+    background-color: #1e2d4a;
+    color: #64748b;
+    border: 1px solid #1e2d4a;
+}
+
 QPushButton#primaryBtn {
     background-color: #2563eb;
     color: #ffffff;
@@ -144,6 +153,22 @@ QPushButton#primaryBtn:disabled {
     background-color: #1e2d4a;
     color: #64748b;
     border: none;
+}
+
+QPushButton#stopBtn {
+    background-color: #7f1d1d;
+    border: 1px solid #ef4444;
+    color: #ffffff;
+}
+
+QPushButton#stopBtn:hover {
+    background-color: #b91c1c;
+}
+
+QPushButton#stopBtn:disabled {
+    background-color: #1e2d4a;
+    color: #64748b;
+    border: 1px solid #1e2d4a;
 }
 
 QTextEdit {
@@ -196,6 +221,21 @@ QCheckBox::indicator:hover {
 QCheckBox::indicator:checked {
     background-color: #2563eb;
     border-color: #60a5fa;
+}
+
+QProgressBar {
+    background-color: #0d1a30;
+    border: 1.5px solid #2a3d66;
+    border-radius: 8px;
+    text-align: center;
+    color: #ffffff;
+    font-weight: bold;
+    height: 20px;
+}
+
+QProgressBar::chunk {
+    background-color: #2563eb;
+    border-radius: 6px;
 }
 """
 
@@ -267,6 +307,12 @@ QPushButton:hover {
     border-color: #64748b;
 }
 
+QPushButton:disabled {
+    background-color: #e2e8f0;
+    color: #94a3b8;
+    border: 1.5px solid #cbd5e1;
+}
+
 QPushButton#primaryBtn {
     background-color: #1d4ed8;
     color: #ffffff;
@@ -280,6 +326,21 @@ QPushButton#primaryBtn:hover {
 }
 
 QPushButton#primaryBtn:disabled {
+    background-color: #cbd5e1;
+    color: #64748b;
+}
+
+QPushButton#stopBtn {
+    background-color: #dc2626;
+    color: #ffffff;
+    border: none;
+}
+
+QPushButton#stopBtn:hover {
+    background-color: #b91c1c;
+}
+
+QPushButton#stopBtn:disabled {
     background-color: #cbd5e1;
     color: #64748b;
 }
@@ -325,24 +386,62 @@ QCheckBox::indicator:checked {
     background-color: #1d4ed8;
     border-color: #1d4ed8;
 }
+
+QProgressBar {
+    background-color: #eff6ff;
+    border: 1.5px solid #94a3b8;
+    border-radius: 8px;
+    text-align: center;
+    color: #0f172a;
+    font-weight: bold;
+    height: 20px;
+}
+
+QProgressBar::chunk {
+    background-color: #1d4ed8;
+    border-radius: 6px;
+}
 """
+
+# ----------------------------------------------------------------------
+# 音訊格式 / 音質選項
+# ----------------------------------------------------------------------
+FORMAT_OPTIONS = {
+    "MP3": "mp3",
+    "M4A（AAC）": "m4a",
+    "Opus": "opus",
+    "FLAC（無損）": "flac",
+    "WAV（無損）": "wav",
+    "最佳原始格式（不轉檔）": None,
+}
+
+QUALITY_OPTIONS = {
+    "最高音質": "0",
+    "高音質": "2",
+    "中等音質": "5",
+    "低音質（檔案較小）": "9",
+}
+
+PERCENT_RE = re.compile(r"\[download\]\s+(\d{1,3}(?:\.\d+)?)%")
+PLAYLIST_ITEM_RE = re.compile(r"Downloading item (\d+) of (\d+)")
 
 # ----------------------------------------------------------------------
 # 工具函式
 # ----------------------------------------------------------------------
 def get_real_download_folder():
-    try:
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
-        )
-        path, _ = winreg.QueryValueEx(key, "{374DE290-123F-4565-9164-39C4925E467B}")
-        winreg.CloseKey(key)
-        real_path = os.path.expandvars(path)
-        if os.path.exists(real_path):
-            return real_path
-    except Exception:
-        pass
+    if winreg is not None:
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+            )
+            path, _ = winreg.QueryValueEx(key, "{374DE290-123F-4565-9164-39C4925E467B}")
+            winreg.CloseKey(key)
+            real_path = os.path.expandvars(path)
+            if os.path.exists(real_path):
+                return real_path
+        except Exception:
+            pass
     return os.path.join(os.path.expanduser("~"), "Downloads")
 
 def apply_theme(app, mode_name):
@@ -356,15 +455,19 @@ def apply_theme(app, mode_name):
 # ----------------------------------------------------------------------
 class DownloadThread(QThread):
     log_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal()
+    progress_signal = pyqtSignal(int)
+    finished_signal = pyqtSignal(bool)  # True = 成功
 
     def __init__(self, cmd):
         super().__init__()
         self.cmd = cmd
+        self.process = None
+        self._stopped = False
 
     def run(self):
+        success = False
         try:
-            process = subprocess.Popen(
+            self.process = subprocess.Popen(
                 self.cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -374,18 +477,47 @@ class DownloadThread(QThread):
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             )
 
-            for line in process.stdout:
+            current_item, total_items = 1, 1
+
+            for line in self.process.stdout:
                 self.log_signal.emit(line)
 
-            process.wait()
-            if process.returncode == 0:
+                item_match = PLAYLIST_ITEM_RE.search(line)
+                if item_match:
+                    current_item = int(item_match.group(1))
+                    total_items = int(item_match.group(2))
+
+                pct_match = PERCENT_RE.search(line)
+                if pct_match:
+                    pct = float(pct_match.group(1))
+                    overall = ((current_item - 1) + pct / 100.0) / total_items * 100.0
+                    self.progress_signal.emit(min(100, int(overall)))
+
+            self.process.wait()
+
+            if self._stopped:
+                self.log_signal.emit("\n🛑 [STOPPED] 下載已被使用者取消\n")
+                success = False
+            elif self.process.returncode == 0:
                 self.log_signal.emit("\n🎉 [SUCCESS] 音訊下載與轉換完成！\n")
+                self.progress_signal.emit(100)
+                success = True
             else:
-                self.log_signal.emit(f"\n💥 [FAILED] 執行失敗，離開代碼：{process.returncode}\n")
+                self.log_signal.emit(f"\n💥 [FAILED] 執行失敗，離開代碼：{self.process.returncode}\n")
+                success = False
         except Exception as e:
             self.log_signal.emit(f"❌ [EXCEPTION] 發生例外錯誤：{e}\n")
+            success = False
         finally:
-            self.finished_signal.emit()
+            self.finished_signal.emit(success)
+
+    def stop(self):
+        self._stopped = True
+        if self.process and self.process.poll() is None:
+            try:
+                self.process.terminate()
+            except Exception:
+                pass
 
 # ----------------------------------------------------------------------
 # ⚙️ 設定彈窗
@@ -458,14 +590,22 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("10m.cc.cd 風格 - YT 音訊下載器")
-        self.setFixedSize(720, 580)
+        self.resize(760, 760)
+        self.setMinimumSize(720, 700)
 
-        self.current_theme = "Dark"
-        self.cfg_artist = True
-        self.cfg_title = True
-        self.cfg_thumb = True
+        self.settings = QSettings("10mccxd", "YTMusicDownloader")
+        self.current_theme = self.settings.value("theme", "Dark")
+        self.cfg_artist = self.settings.value("cfg_artist", True, type=bool)
+        self.cfg_title = self.settings.value("cfg_title", True, type=bool)
+        self.cfg_thumb = self.settings.value("cfg_thumb", True, type=bool)
 
-        self.output_dir = get_real_download_folder()
+        saved_path = self.settings.value("output_dir", "")
+        if saved_path and os.path.exists(saved_path):
+            self.output_dir = saved_path
+        else:
+            self.output_dir = get_real_download_folder()
+
+        self.dl_thread = None
         self.init_ui()
 
     def init_ui(self):
@@ -478,7 +618,7 @@ class MainWindow(QMainWindow):
         card.setObjectName("mainCard")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(24, 24, 24, 24)
-        card_layout.setSpacing(16)
+        card_layout.setSpacing(14)
 
         top_layout = QHBoxLayout()
         title_label = QLabel("✉️ YT Music 音訊下載器")
@@ -494,7 +634,7 @@ class MainWindow(QMainWindow):
         card_layout.addLayout(top_layout)
 
         self.url_entry = QLineEdit()
-        self.url_entry.setPlaceholderText("貼上 YouTube / YT Music 網址...")
+        self.url_entry.setPlaceholderText("貼上 YouTube / YT Music 網址（單支影片或播放列表）...")
         card_layout.addWidget(self.url_entry)
 
         path_layout = QHBoxLayout()
@@ -507,12 +647,80 @@ class MainWindow(QMainWindow):
         path_layout.addWidget(browse_btn)
         card_layout.addLayout(path_layout)
 
-        self.download_btn = QPushButton("🚀 開始下載 MP3")
+        # ---- 音訊格式 / 音質 ----
+        format_group = QGroupBox("🎧 格式與音質")
+        format_layout = QHBoxLayout()
+
+        format_layout.addWidget(QLabel("格式:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(FORMAT_OPTIONS.keys())
+        format_layout.addWidget(self.format_combo)
+
+        format_layout.addWidget(QLabel("音質:"))
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItems(QUALITY_OPTIONS.keys())
+        format_layout.addWidget(self.quality_combo)
+
+        format_group.setLayout(format_layout)
+        card_layout.addWidget(format_group)
+
+        # ---- 播放列表 ----
+        playlist_group = QGroupBox("📃 播放列表")
+        playlist_layout = QHBoxLayout()
+
+        self.chk_playlist = QCheckBox("下載整個播放列表")
+        self.chk_playlist.toggled.connect(self.on_playlist_toggled)
+        playlist_layout.addWidget(self.chk_playlist)
+
+        playlist_layout.addWidget(QLabel("起始:"))
+        self.playlist_start = QLineEdit()
+        self.playlist_start.setPlaceholderText("1")
+        self.playlist_start.setFixedWidth(60)
+        self.playlist_start.setEnabled(False)
+        playlist_layout.addWidget(self.playlist_start)
+
+        playlist_layout.addWidget(QLabel("結束:"))
+        self.playlist_end = QLineEdit()
+        self.playlist_end.setPlaceholderText("全部")
+        self.playlist_end.setFixedWidth(60)
+        self.playlist_end.setEnabled(False)
+        playlist_layout.addWidget(self.playlist_end)
+
+        playlist_layout.addStretch()
+        playlist_group.setLayout(playlist_layout)
+        card_layout.addWidget(playlist_group)
+
+        # ---- 下載 / 停止按鈕 ----
+        btn_row = QHBoxLayout()
+        self.download_btn = QPushButton("🚀 開始下載")
         self.download_btn.setObjectName("primaryBtn")
         self.download_btn.setFixedHeight(42)
         self.download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.download_btn.clicked.connect(self.start_download)
-        card_layout.addWidget(self.download_btn)
+
+        self.stop_btn = QPushButton("⏹ 停止")
+        self.stop_btn.setObjectName("stopBtn")
+        self.stop_btn.setFixedHeight(42)
+        self.stop_btn.setFixedWidth(100)
+        self.stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self.stop_download)
+
+        btn_row.addWidget(self.download_btn)
+        btn_row.addWidget(self.stop_btn)
+        card_layout.addLayout(btn_row)
+
+        # ---- 進度條 ----
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        card_layout.addWidget(self.progress_bar)
+
+        self.open_folder_btn = QPushButton("📂 開啟下載資料夾")
+        self.open_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.open_folder_btn.setEnabled(False)
+        self.open_folder_btn.clicked.connect(self.open_output_folder)
+        card_layout.addWidget(self.open_folder_btn)
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
@@ -523,10 +731,14 @@ class MainWindow(QMainWindow):
         self.append_log("✅ [SYS] 環境檢測通過 (PyQt6 & yt-dlp 已載入)\n")
         self.append_log(f"📁 [SYS] 預設下載路徑: {self.output_dir}\n")
 
+    def on_playlist_toggled(self, checked):
+        self.playlist_start.setEnabled(checked)
+        self.playlist_end.setEnabled(checked)
+
     def append_log(self, text):
-        self.log_box.moveCursor(self.log_box.textCursor().MoveOperation.End)
+        self.log_box.moveCursor(QTextCursor.MoveOperation.End)
         self.log_box.insertPlainText(text)
-        self.log_box.moveCursor(self.log_box.textCursor().MoveOperation.End)
+        self.log_box.moveCursor(QTextCursor.MoveOperation.End)
 
     def browse_folder(self):
         selected = QFileDialog.getExistingDirectory(self, "選擇下載路徑", self.path_entry.text())
@@ -537,6 +749,20 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self)
         dialog.exec()
 
+    def open_output_folder(self):
+        path = self.path_entry.text().strip()
+        if not os.path.exists(path):
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            self.append_log(f"❌ [ERROR] 無法開啟資料夾：{e}\n")
+
     def start_download(self):
         url = self.url_entry.text().strip()
         save_path = self.path_entry.text().strip()
@@ -544,21 +770,49 @@ class MainWindow(QMainWindow):
         if not url:
             self.append_log("❌ [ERROR] 網址不能為空！\n")
             return
+
         if not os.path.exists(save_path):
-            self.append_log("❌ [ERROR] 儲存路徑不存在！\n")
+            try:
+                os.makedirs(save_path, exist_ok=True)
+                self.append_log(f"📁 [SYS] 已建立新資料夾：{save_path}\n")
+            except Exception as e:
+                self.append_log(f"❌ [ERROR] 儲存路徑不存在，且無法自動建立：{e}\n")
+                return
+
+        is_playlist = self.chk_playlist.isChecked()
+        start_val = self.playlist_start.text().strip()
+        end_val = self.playlist_end.text().strip()
+
+        if is_playlist and start_val and not start_val.isdigit():
+            self.append_log("❌ [ERROR] 播放列表「起始」需為數字！\n")
+            return
+        if is_playlist and end_val and not end_val.isdigit():
+            self.append_log("❌ [ERROR] 播放列表「結束」需為數字！\n")
             return
 
-        output_template = os.path.join(save_path, "%(title)s.%(ext)s")
+        if is_playlist:
+            output_template = os.path.join(save_path, "%(playlist_index)03d - %(title)s.%(ext)s")
+        else:
+            output_template = os.path.join(save_path, "%(title)s.%(ext)s")
 
-        cmd = [
-            sys.executable, "-m", "yt_dlp",
-            "--no-playlist",
-            "-x",
-            "--audio-format", "mp3",
-            "--audio-quality", "0",
-            "--concurrent-fragments", "16",
-            "-N", "16"
-        ]
+        fmt_key = self.format_combo.currentText()
+        fmt_value = FORMAT_OPTIONS[fmt_key]
+        quality_value = QUALITY_OPTIONS[self.quality_combo.currentText()]
+
+        cmd = [sys.executable, "-m", "yt_dlp"]
+
+        if is_playlist:
+            cmd.append("--yes-playlist")
+            if start_val:
+                cmd.extend(["--playlist-start", start_val])
+            if end_val:
+                cmd.extend(["--playlist-end", end_val])
+        else:
+            cmd.append("--no-playlist")
+
+        cmd.extend(["-x", "--audio-quality", quality_value])
+        if fmt_value:
+            cmd.extend(["--audio-format", fmt_value])
 
         need_add_metadata = False
         if self.cfg_artist:
@@ -572,28 +826,56 @@ class MainWindow(QMainWindow):
         if self.cfg_thumb:
             cmd.append("--embed-thumbnail")
 
+        cmd.extend(["-N", "16"])
         cmd.extend([url, "-o", output_template])
 
         self.download_btn.setEnabled(False)
         self.download_btn.setText("下載中，請稍候...")
-        self.append_log(f"⌛ [EXEC] 開始下載任務...\nURL: {url}\nPATH: {save_path}\n" + "-"*50 + "\n")
+        self.stop_btn.setEnabled(True)
+        self.open_folder_btn.setEnabled(False)
+        self.progress_bar.setValue(0)
+        self.append_log(f"⌛ [EXEC] 開始下載任務...\nURL: {url}\nPATH: {save_path}\n" + "-" * 50 + "\n")
 
         self.dl_thread = DownloadThread(cmd)
         self.dl_thread.log_signal.connect(self.append_log)
+        self.dl_thread.progress_signal.connect(self.progress_bar.setValue)
         self.dl_thread.finished_signal.connect(self.on_download_finished)
         self.dl_thread.start()
 
-    def on_download_finished(self):
+    def stop_download(self):
+        if self.dl_thread and self.dl_thread.isRunning():
+            self.dl_thread.stop()
+            self.stop_btn.setEnabled(False)
+
+    def on_download_finished(self, success):
         self.download_btn.setEnabled(True)
-        self.download_btn.setText("🚀 開始下載 MP3")
+        self.download_btn.setText("🚀 開始下載")
+        self.stop_btn.setEnabled(False)
+        if success:
+            self.open_folder_btn.setEnabled(True)
+        else:
+            self.progress_bar.setValue(0)
+
+    def closeEvent(self, event):
+        if self.dl_thread and self.dl_thread.isRunning():
+            self.dl_thread.stop()
+            self.dl_thread.wait(2000)
+
+        self.settings.setValue("theme", self.current_theme)
+        self.settings.setValue("cfg_artist", self.cfg_artist)
+        self.settings.setValue("cfg_title", self.cfg_title)
+        self.settings.setValue("cfg_thumb", self.cfg_thumb)
+        self.settings.setValue("output_dir", self.path_entry.text().strip())
+
+        event.accept()
 
 # ----------------------------------------------------------------------
 # 進入點
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    apply_theme(app, "Dark")
 
     window = MainWindow()
+    apply_theme(app, window.current_theme)
     window.show()
     sys.exit(app.exec())
